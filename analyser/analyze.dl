@@ -1,0 +1,399 @@
+#define ENABLE_INPUT_FROM_FILES
+
+.number_type ArgIndex    // Index used to qualify block arguments
+.symbol_type Transfer    // ID of a transfer between blocks
+.symbol_type Name        // Name associated to an object
+.symbol_type SSA         // ID of a statement or block argument and its value
+.symbol_type Block       // ID of a basic block
+
+// -- input relations --
+
+// Entry block for a function
+.decl function(id_block: Block, name: Name)
+
+// All statements
+.decl statement(id: SSA)
+
+// All blocks
+.decl block(id_block: Block)
+
+// Associates blocks to contained statements
+.decl blockStmt(id_block: Block, id_stmt: SSA)
+
+// An input argument to a block
+.decl argument(id_arg: SSA,
+               id_block: Block,
+               index: ArgIndex)
+
+// Follows relation over statements within single blocks
+.decl follows(id_next: SSA, id_prev: SSA)
+
+.decl assign(id: SSA, var_id: SSA)                      // Assignments from var_id to id
+.decl const(id: SSA, value: symbol)                     // Constants
+.decl uop(id: SSA, id_var: SSA, op: Name)               // Unary operations
+.decl bop(id: SSA, id_lhs: SSA, id_rhs: SSA, op: Name)  // Binary operations
+
+.decl load(id: SSA, field: Name)                        // Storage field read
+.decl store(id: SSA, field: Name, var_id: SSA)          // Storage field write
+
+// Member access (e.g. msg.sender)
+// -> not true, msg.sender is passed via "builtinVariable("SENDER")!
+.decl structLoad(id: SSA, id_struct: SSA, field: Name)
+
+// Member access (e.g. someStruct.value = x, not relevant for the project)
+.decl structStore(id: SSA, id_struct: SSA, field: Name, id_var: SSA)
+
+// Goto transfer with id `id_transfer` from `id_block_from` to `id_block_to`
+.decl goto(id_transfer: Transfer,
+           id_block_from: Block,
+           id_block_to: Block)
+
+// Conditional branching (think of two Goto's for each true/false branch)
+.decl branch(id_transfer_true: Transfer,
+             id_transfer_false: Transfer,
+             id_block_from: Block,
+             id_block_true: Block,
+             id_block_false: Block,
+             var_cond_id: SSA)  // `var_cond_id` references the condition
+
+// Jump from a block `id_block_from` to a different function with entry block
+// `id_block_to` (i.e. a function call). The called function returns to the
+// continuation block `id_continuation` of the caller function via return
+// transfers.
+.decl jump(id_transfer: Transfer,
+           id_block_from: Block,
+           id_block_to: Block,
+           id_continuation: Block)
+
+// Return transfer (note there is no target block; if needed, this can be
+// inferred at call sites via the `id_continuation` of the jump transfer).
+.decl return(id_transfer: Transfer, id_block_from: Block)
+
+// List of arguments passed in a transfer
+.decl transferArgument(id_transfer: Transfer, id_argument_value: SSA, index: ArgIndex)
+
+// Ignore these...
+//.decl arrayStore(id: SSA, id_array: SSA, id_index: SSA, id_var: SSA)
+//.decl mapStore(id: SSA, id_map: SSA, id_key: SSA, id_var: SSA)
+//.decl arrayLoad(id: SSA, id_array: SSA, id_index: SSA)
+//.decl mapLoad(id: SSA, id_map: SSA, id_key: SSA)
+//.decl call(id_transfer: Transfer, id_block_from: Block, id_block_to: Block, id_continuation: Block)
+//.decl unknownBlock(id_block: Block)
+.decl selfdestruct(id: SSA, address: SSA)
+.decl revert(id_transfer: Transfer, id_block: Block)
+.decl builtinVariable(id: SSA, name: symbol)
+
+#ifdef ENABLE_INPUT_FROM_FILES
+.input function
+.input block
+.input blockStmt
+.input follows
+.input argument
+.input statement
+.input assign
+.input const
+.input uop
+.input bop
+.input load
+.input structLoad
+.input store
+.input structStore
+.input goto
+.input branch
+.input return
+.input jump
+.input transferArgument
+.input selfdestruct
+.input revert
+.input builtinVariable
+// Ignore these...
+//.input arrayLoad
+//.input mapLoad
+//.input arrayStore
+//.input mapStore
+//.input call
+//.input unknownBlock
+#endif
+
+//add "dummySSA" to empty blocks:
+.decl blockStmtDummy(block: Block, id: SSA)
+blockStmtDummy(b, id) :- blockStmt(b, id).
+blockStmtDummy(b, cat("DummySSA", b)) :- block(b), !blockStmt(b, _). 
+
+.decl allFields(field: Name)
+allFields(f) :- load(_, f).
+allFields(f) :- store(_, f, _).
+
+//relates a given block to the function it belongs to
+.decl functionBlock(block: Block, function: Name)
+functionBlock(b, f) :- function(b, f).
+functionBlock(b, f) :- functionBlock(from, f), goto(_, from, b).
+functionBlock(b, f) :- functionBlock(from, f), jump(_, from, _, b).
+functionBlock(b, f) :- functionBlock(from, f), (branch(_, _, from, b, _, _); branch(_, _, from, _, b, _)).
+
+// Helper relations
+.decl msgSender(id: SSA)
+msgSender(id) :- builtinVariable(id, "SENDER").
+
+.decl msgValue(id: SSA)
+msgValue(id) :- builtinVariable(id, "VALUE").
+// -- output relations --
+.decl tainted_sinks(id: SSA)
+
+.decl firstStmt(id: SSA, id_block: Block)
+firstStmt(first, block) :- blockStmtDummy(block, first), !follows(first, _).
+
+.decl lastStmt(id: SSA, id_block: Block)
+lastStmt(last, block) :- blockStmtDummy(block, last), !follows(_, last).
+
+
+
+
+.comp BlockFact<case> {
+      .decl B(id: Block, t1: Transfer, t2: Transfer, t3: Transfer, nL: number)
+      B(block, "None", "None", "None", 0) :- function(block, _).
+      B(to, t1, t2, t3, nL) :- goto(_, from, to), B(from, t1, t2, t3, nL).
+      
+
+      B(to, t1, t2, t3, 1) :- jump(t1, from, to, _), B(from, "None", t2, t3, 0).
+      B(to, t1, t2, t3, 2) :- jump(t2, from, to, _), B(from, t1, "None", t3, 1).
+      B(to, t1, t2, t3, 3) :- jump(t3, from, to, _), B(from, t1, t2, "None", 2).
+      //nesting level 4 is the cap, "continuation" of execution trace not tracked beyond level 3:
+      B(to, t1, t2, t3, 4) :- jump(_, from, to, _), B(from, t1, t2, t3, 3).
+      B(to, t1, t2, t3, 4) :- jump(_, from, to, _), B(from, t1, t2, t3, 4).
+      
+      
+      .comp unconditional {
+      	    //for reached 
+      	    B(to, t1, t2, t3, nL) :- branch(_, _, from, to, _, _), B(from, t1, t2, t3, nL).
+      	    B(to, t1, t2, t3, nL) :- branch(_, _, from, _, to, _), B(from, t1, t2, t3, nL).
+      	    //since all code is reachable, it must be possible to return from any nested function:
+     	    //also covers higher levels of nesting!
+      	    B(cont, t1, t2, t3, nL) :- jump(_, from, _, cont), B(from, t1, t2, t3, nL).
+      }
+      .comp guarded {
+      	    //for block taints: ensure that taints are not propagated across guard and to continuation blocks for untainted call blocks (problem at higher levels of nesting because trace not unique anymore)
+      	    B(to, t1, t2, t3, nL) :- B(from, t1, t2, t3, nL), branch(_, _, from, to, _, id), notAGuard(from, id, t1, t2, t3, nL).
+	    B(to, t1, t2, t3, nL) :- B(from, t1, t2, t3, nL), branch(_, _, from, _, to, id), notAGuard(from, id, t1, t2, t3, nL).
+      	    B(to, "None", t2, t3, 0) :- B(from, t1, t2, t3, 1), return(_, from), jump(t1, _, _, to).
+	    B(to, t1, "None", t3, 1) :- B(from, t1, t2, t3, 2), return(_, from), jump(t2, _, _, to).
+	    B(to, t1, t2, "None", 2) :- B(from, t1, t2, t3, 3), return(_, from), jump(t3, _, _, to).
+	    //higher levels of nesting: require that call site block as well as return block are tainted!
+	    //ensure that jump and return "match" (i.e. jump to and return from the same function => functionBlock!)
+	    B(to, t1, t2, t3, 3) :- B(from, t1, t2, t3, 4), B(orig, t1, t2, t3, 3), return(_, from), jump(_, orig, called, to), functionBlock(called, f), functionBlock(from, f).
+	    B(to, t1, t2, t3, 4) :- B(from, t1, t2, t3, 4), B(orig, t1, t2, t3, 4), return(_, from), jump(_, orig, called, to),  functionBlock(called, f), functionBlock(from, f).
+
+      }
+      .init branch = case
+}
+
+//indicates that given block was reached by given execution.
+//used to derive "initial facts"
+.init reached = BlockFact<unconditional>
+
+
+.comp Propagation<case, case2> {
+      
+      //generic "Field-Fact" predicate:s 
+      // currentStmt describes the "position" (SSA) at which the fact holds - BEFORE (B) resp. AFTER (A)
+      // depField describes the field the fact depends on (only used for DependsOnField)
+      // t1 to t3 describe the execution trace (function calls), nestingLevel names 
+      // nestingLevel describes up to which i ti is not "None", 3 is the maximum value and the onset of "imprecision" (note: if no further function calls occur, level 3 itself is still perfectly percise)
+
+
+      //Note: "DummySSAs" ensure that field-facts also propagated if block does not contain any SSAs (eg empy return etc)
+      .decl FB(currentStmt: SSA, field: Name, depField: Name, t1: Transfer, t2: Transfer, t3: Transfer, nestingLevel: number)
+      .decl FA(currentStmt: SSA, field: Name, depField: Name, t1: Transfer, t2: Transfer, t3: Transfer, nestingLevel: number)
+      
+      
+      //generic "SSA-Fact" predicate:
+      //describes facts that hold for SSA (AFTER execution of corresponding stmt)
+      .decl A(block: Block, id: SSA, depField: Name, t1: Transfer, t2: Transfer, t3: Transfer, nestingLevel: number)
+      
+      .decl allDFS(field: Name)
+      allDFS(df) :- FA(_, _, df, _, _, _, _).
+      allDFS(df) :- FB(_, _, df, _, _, _, _).
+      allDFS(df) :- A(_, _, df, _, _, _, _).
+
+      //pass field fact after statement to "before" of next statment in block:
+      FB(c, f, df, t1, t2, t3, nL) :- FA(prev, f, df, t1, t2, t3, nL), follows(c, prev).
+
+      //unless statement is a store or a selfdestruct (since field update of function don't matter any more if contract destroyed), "before" fact passed to "after" (also extends to DummySSAs that belong to no type of statement):
+      FA(c, f, df, t1, t2, t3, nL) :- !store(c, f, _), !selfdestruct(c, _), FB(c, f, df, t1, t2, t3, nL).
+
+      //upon store, field fact overwritten with stored variable fact:
+      FA(c, f, df, t1, t2, t3, nL) :- store(c, f, storeVar), A(b, storeVar, df, t1, t2, t3, nL), blockStmtDummy(b, c).
+
+      //upon branch and goto, field facts passed to first block statement in following block:
+      //NOTE: this implementation assumes that each block contains at least one SSA - solved by adding Dummy values for empty blocks (eg. return only) (see BlockStmtDummy above)
+      //This is not the most elegant solution but the least error prone that came to mind :)
+      FB(first, f, df, t1, t2, t3, nL) :- FA(last, f, df, t1, t2, t3, nL), goto(_, b1, b2), lastStmt(last, b1), firstStmt(first, b2).
+      //branch rules moved to "unconditional / guarded" case distinction
+      
+
+      //same upon jump, but must adjust trace:
+      FB(first, f, df, t1, t2, t3, 1) :- FA(last, f, df, "None", t2, t3, 0), jump(t1, b1, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+      FB(first, f, df, t1, t2, t3, 2) :- FA(last, f, df, t1, "None", t3, 1), jump(t2, b1, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+      FB(first, f, df, t1, t2, t3, 3) :- FA(last, f, df, t1, t2, "None", 2), jump(t3, b1, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+      
+      //handle higher levels of nesting
+      FB(first, f, df, t1, t2, t3, 4) :- FA(last, f, df, t1, t2, t3, 3), jump(_, b1, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+      FB(first, f, df, t1, t2, t3, 4) :- FA(last, f, df, t1, t2, t3, 4), jump(_, b1, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+
+      //return also passes fields facts to first block stmt in following block and must adjust trace:
+      FB(first, f, df, "None", t2, t3, 0) :- FA(last, f, df, t1, t2, t3, 1), return(_, from), jump(t1, _, _, cont), firstStmt(first, cont), lastStmt(last, from).
+      FB(first, f, df, t1, "None", t3, 1) :- FA(last, f, df, t1, t2, t3, 2), return(_, from), jump(t2, _, _, cont), firstStmt(first, cont), lastStmt(last, from).
+      FB(first, f, df, t1, t2, "None", 2) :- FA(last, f, df, t1, t2, t3, 3), return(_, from), jump(t3, _, _, cont), firstStmt(first, cont), lastStmt(last, from).
+      
+     
+
+      //upon assignment/uop, SSA id inherits facts of varid SSA :
+      A(b, id, df, t1, t2, t3, nL) :- assign(id, varid), A(b, varid, df, t1, t2, t3, nL), blockStmtDummy(b, id).
+      A(b, id, df, t1, t2, t3, nL) :- uop(id, varid, _), A(b, varid, df, t1, t2, t3, nL), blockStmtDummy(b, id).
+      
+      //Binary operations must be handled differently for some instantiations -> "case" argument of component
+      .comp aggressive {
+      	    //used for dependsOnArgs/Fields/OtherArgs etc.
+      	   A(b, id, df, t1, t2, t3, nL) :- bop(id, l, r, _), (A(b, l, df, t1, t2, t3, nL); A(b, r, df, t1, t2, t3, nL)), blockStmtDummy(b, id).
+      }
+
+      .comp moderate {
+      	    //used for "doesNotDependOnSender" -> if either arg does, result does too!
+      	   A(b, id, df, t1, t2, t3, nL) :- bop(id, l, r, _), A(b, l, df, t1, t2, t3, nL), A(b, r, df, t1, t2, t3, nL), blockStmtDummy(b, id).
+      }
+      
+      .init assignment = case
+      
+
+     //upon load, SSA id inherits facts of loaded field:
+     A(b, id, df, t1, t2, t3, nL) :- load(id, f), FB(id, f, df, t1, t2, t3, nL), blockStmtDummy(b, id).
+
+    //propagate "local" (i.e. not merged) facts to merge block (goto):
+     A(block, id, df, t1, t2, t3, nL) :- goto(_, from, block), A(from, id, df, t1, t2, t3, nL).
+
+     //propagate "merge facts" (input args to merge block):
+     A(block, argid, df, t1, t2, t3, nL) :- goto(transfer, from, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, nL).
+
+     //taints based on msg/function arguments should not be passed on after a guard:
+     //thus, "guarded" version of branches is used for "tainted", regular (unconditional) version for other relations
+     .comp unconditional {
+     	  
+	   //branches:
+	   //propagate "local" SSA facts across branch:
+     	   A(block, id, df, t1, t2, t3, nL) :- branch(_, _, from, block, _, _),  A(from, id, df, t1, t2, t3, nL).
+     	   A(block, id, df, t1, t2, t3, nL) :- branch(_, _, from, _, block, _),  A(from, id, df, t1, t2, t3, nL).
+	   //propagate block inputs across branch: (not sure if a branch with block inputs exists, but just in case):
+	   A(block, argid, df, t1, t2, t3, nL) :- branch(transfer, _, from, block, _, _),  A(from, id, df, t1, t2, t3, nL), argument(argid, block, i), transferArgument(transfer, id, i).
+     	   A(block, argid, df, t1, t2, t3, nL) :- branch(_, transfer, from, _, block, _),  A(from, id, df, t1, t2, t3, nL), argument(argid, block, i), transferArgument(transfer, id, i).
+	   //propagate field facts across branch:
+	   FB(first, f, df, t1, t2, t3, nL) :- FA(last, f, df, t1, t2, t3, nL), branch(_, _, b1, b2, _, _), lastStmt(last, b1), firstStmt(first, b2).
+      	   FB(first, f, df, t1, t2, t3, nL) :- FA(last, f, df, t1, t2, t3, nL), branch(_, _, b1, _, b2, _), lastStmt(last, b1), firstStmt(first, b2).
+
+	   //propagate SSA facts (i.e. local variable facts) across jump:
+     	   A(cont, id, df, t1, t2, t3, nL) :- jump(_, from, _, cont), A(from, id, df, t1, t2, t3, nL).
+
+
+	   //higher level nesting: return with same level of nesting as originator block of jump was reached (3 resp. 4). Again, ensure that jump and return match. 
+     	   A(block, argid, df, t1, t2, t3, 3) :- return(transfer, from), reached.B(orig, t1, t2, t3, 3), jump(_, orig, to, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 4), functionBlock(to, f), functionBlock(from, f).
+     	   A(block, argid, df, t1, t2, t3, 4) :- return(transfer, from), reached.B(orig, t1, t2, t3, 4), jump(_, orig, to, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 4), functionBlock(to, f), functionBlock(from, f).
+
+	   //higher level nesting: return with same level of nesting as originator block of jump was reached (3 resp. 4). Ensure that the jump and return are related (jump to same function f and return from same function f)
+      	   FB(first, f, df, t1, t2, t3, 4) :- FA(last, f, df, t1, t2, t3, 4), reached.B(orig, t1, t2, t3, 4), return(_, from), jump(_, orig, to, cont), firstStmt(first, cont), lastStmt(last, from), functionBlock(to, fun), functionBlock(from, fun).
+      	   FB(first, f, df, t1, t2, t3, 3) :- FA(last, f, df, t1, t2, t3, 4), reached.B(orig, t1, t2, t3, 3), return(_, from), jump(_, orig, to, cont), firstStmt(first, cont), lastStmt(last, from), functionBlock(to, fun), functionBlock(from, fun).
+     }
+     .comp guarded {
+
+
+     	   //only pass on taints if branch condition is not a guard: 
+	   //(note that field-based taints (argument depends on an "in-between" tainted field) are thus also not passed along. This is not a problem because the additional rules the taint relation defines derive those taints directly from field dependence (which is passed on unconditionally) and in-between taints).
+	   //propagate "local" SSA facts across branch if not guarded:
+     	   A(block, id, df, t1, t2, t3, nL) :- branch(_, _, from, block, _, condition), A(from, id, df, t1, t2, t3, nL), notAGuard(from, condition, t1, t2, t3, nL).
+     	   A(block, id, df, t1, t2, t3, nL) :- branch(_, _, from, _, block, condition), A(from, id, df, t1, t2, t3, nL), notAGuard(from, condition, t1, t2, t3, nL).
+	   //propagate block inputs across branch if not guarded: (not sure if a branch with block inputs exists, but just in case):
+	   A(block, argid, df, t1, t2, t3, nL) :- branch(transfer, _, from, block, _, condition),  A(from, id, df, t1, t2, t3, nL), argument(argid, block, i), transferArgument(transfer, id, i), notAGuard(from, condition, t1, t2, t3, nL).
+     	   A(block, argid, df, t1, t2, t3, nL) :- branch(_, transfer, from, _, block, condition),  A(from, id, df, t1, t2, t3, nL), argument(argid, block, i), transferArgument(transfer, id, i), notAGuard(from, condition, t1, t2, t3, nL).
+	   //propagate field facts across branch if not guarded:
+	   FB(first, f, df, t1, t2, t3, nL) :- branch(_, _, b1, b2, _, condition), lastStmt(last, b1), firstStmt(first, b2), FA(last, f, df, t1, t2, t3, nL), notAGuard(b1, condition, t1, t2, t3, nL).
+      	   FB(first, f, df, t1, t2, t3, nL) :- branch(_, _, b1, _, b2, condition), lastStmt(last, b1), firstStmt(first, b2), FA(last, f, df, t1, t2, t3, nL), notAGuard(b1, condition, t1, t2, t3, nL).
+
+
+	   //propagate SSA facts (i.e. local variable facts) across jump (if call function did not sanitize inputs (=> if continuation block tainted)):
+     	   A(cont, id, df, t1, t2, t3, nL) :- jump(_, from, _, cont), A(from, id, df, t1, t2, t3, nL), blockTaint.B(cont, t1, t2, t3, nL).
+
+
+	   //higher level nesting: return with same level of nesting as originator block of jump was reached (3 resp. 4). Again, ensure that jump and return match.
+	   //instead of reached, require that call site is a tainted block 
+     	   A(block, argid, df, t1, t2, t3, 3) :- return(transfer, from), blockTaint.B(orig, t1, t2, t3, 3), jump(_, orig, to, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 4), functionBlock(to, f), functionBlock(from, f).
+     	   A(block, argid, df, t1, t2, t3, 4) :- return(transfer, from), blockTaint.B(orig, t1, t2, t3, 4), jump(_, orig, to, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 4), functionBlock(to, f), functionBlock(from, f).
+
+	   //higher level nesting: return with same level of nesting as originator block of jump was reached (3 resp. 4). Ensure that the jump and return are related (jump to same function fun and return from same function fun)
+	   //instead of reached, require that call site is a tainted block 
+      	   FB(first, f, df, t1, t2, t3, 4) :- FA(last, f, df, t1, t2, t3, 4), blockTaint.B(orig, t1, t2, t3, 4), return(_, from), jump(_, orig, to, cont), firstStmt(first, cont), lastStmt(last, from), functionBlock(to, fun), functionBlock(from, fun).
+      	   FB(first, f, df, t1, t2, t3, 3) :- FA(last, f, df, t1, t2, t3, 4), blockTaint.B(orig, t1, t2, t3, 3), return(_, from), jump(_, orig, to, cont), firstStmt(first, cont), lastStmt(last, from), functionBlock(to, fun), functionBlock(from, fun).
+     }
+     .init branch = case2
+     //jump also propagates facts to input arguments, but with additional trace handling:
+     A(block, argid, df, t1, t2, t3, 1) :- jump(t1, from, block, _), argument(argid, block, i), transferArgument(t1, id, i), A(from, id, df, "None", t2, t3, 0).
+     A(block, argid, df, t1, t2, t3, 2) :- jump(t2, from, block, _), argument(argid, block, i), transferArgument(t2, id, i), A(from, id, df, t1, "None", t3, 1).  
+     A(block, argid, df, t1, t2, t3, 3) :- jump(t3, from, block, _), argument(argid, block, i), transferArgument(t3, id, i), A(from, id, df, t1, t2, "None", 2).
+    
+     //higher-level nesting: 
+     A(block, argid, df, t1, t2, t3, 4) :- jump(transfer, from, block, _), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 3).
+     A(block, argid, df, t1, t2, t3, 4) :- jump(transfer, from, block, _), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 4).
+
+     //and return propagates facts to continuation block inputs:
+     A(block, argid, df, "None", t2, t3, 0) :- return(transfer, from), jump(t1, _, _, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 1).
+     A(block, argid, df, t1, "None", t3, 1) :- return(transfer, from), jump(t2, _, _, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 2).  
+     A(block, argid, df, t1, t2, "None", 2) :- return(transfer, from), jump(t3, _, _, block), argument(argid, block, i), transferArgument(transfer, id, i), A(from, id, df, t1, t2, t3, 3).
+
+
+     
+     
+}
+
+
+
+//depends on other args should be propagated in a guarded fashion: used to exclude SSAs from being considered a guard; but if an argument value is assigned while they are sanitized, this should not eliminate the possibility of it being a guard further down the control flow graph (upon merge with "unsafe branch" etc; see preliminary test contract 36 for an example
+.init dependsOnOtherArgs = Propagation<aggressive, guarded>
+//derive initial facts:
+dependsOnOtherArgs.A(block, id, "None", t1, t2, t3, nL) :- msgValue(id), blockStmtDummy(block, id), blockTaint.B(block, t1, t2, t3, nL).
+dependsOnOtherArgs.A(block, id, "None", "None", "None", "None", 0) :- function(block, _), argument(id, block, _).
+
+.init doesNotDependOnSender = Propagation<moderate, unconditional>
+//constant values do not depend on sender:
+doesNotDependOnSender.A(block, id, "None", t1, t2, t3, nL) :- blockStmtDummy(block, id), reached.B(block, t1, t2, t3, nL), const(id, _).
+//other args do not depend on sender:
+doesNotDependOnSender.A(block, id, "None", "None", "None", "None", 0) :- function(block, _), argument(id, block, _).
+//initial field values do not depend on sender:
+doesNotDependOnSender.FB(first, f, "None", "None", "None", "None", 0) :- function(block, _), firstStmt(first, block), allFields(f).
+//msg.value does not depend on sender:
+doesNotDependOnSender.A(block, id, "None", t1, t2, t3, nL) :- msgValue(id), blockStmtDummy(block, id), reached.B(block, t1, t2, t3, nL).
+
+.init dependsOnField = Propagation<aggressive, unconditional>
+//field values depend on their own initial value initially 
+dependsOnField.FB(first, f, f, "None", "None", "None", 0) :- function(block, _), firstStmt(first, block), allFields(f).
+
+
+.decl notAGuard(block: Block, id: SSA, t1: Transfer, t2: Transfer, t3: Transfer, nL: number)
+notAGuard(block, id, t1, t2, t3, nL) :- (doesNotDependOnSender.A(block, id, "None", t1, t2, t3, nL); dependsOnOtherArgs.A(block, id, "None", t1, t2, t3, nL); (dependsOnField.A(block, id, f, t1, t2, t3, nL), taintedFieldInBetween(f))).
+
+.init blockTaint = BlockFact<guarded>
+
+.init tainted = Propagation<aggressive, guarded>
+tainted.A(block, id, "None", t1, t2, t3, nL) :- msgSender(id), blockStmtDummy(block, id), blockTaint.B(block, t1, t2, t3, nL).
+tainted.A(block, id, "None", t1, t2, t3, nL) :- msgValue(id), blockStmtDummy(block, id), blockTaint.B(block, t1, t2, t3, nL).
+tainted.A(block, id, "None", "None", "None", "None", 0) :- function(block, _), argument(id, block, _).
+
+//any field or variable depending on an "in-between" tainted field is always tainted:
+tainted.A(block, id, "None", t1, t2, t3, nL) :- dependsOnField.A(block, id, f, t1, t2, t3, nL), taintedFieldInBetween(f).
+tainted.FA(id, f, "None", t1, t2, t3, nL) :- dependsOnField.FA(id, f, df, t1, t2, t3, nL), taintedFieldInBetween(df).
+tainted.FB(id, f, "None", t1, t2, t3, nL) :- dependsOnField.FB(id, f, df, t1, t2, t3, nL), taintedFieldInBetween(df).
+
+//indicates if value of field is tainted "in-between" transations
+.decl taintedFieldInBetween(field: Name)
+taintedFieldInBetween(f) :- tainted.FA(id, f, "None", _, _, _, 0), return(_, from), lastStmt(id, from).
+
+
+tainted_sinks(id) :- selfdestruct(loc, id), tainted.A(block, id,_,  _, _, _, _), blockStmtDummy(block, loc).
+
+.output tainted_sinks
